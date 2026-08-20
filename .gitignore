@@ -1,0 +1,4 @@
+# Book PDFs stay local — don't push copyrighted material to GitHub
+*.pdf
+
+.DS_Store
