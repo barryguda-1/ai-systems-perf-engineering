@@ -1,0 +1,822 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NUMA-friendly Allocation &amp; Pinned Memory — Visualized</title>
+<style>
+  :root{
+    --bg:#0a0e13; --panel:#11161d; --panel2:#161e28; --line:#243042;
+    --txt:#e8eef4; --mut:#94a3b3; --grn:#76b900; --org:#ffb350;
+    --blu:#4fc3f7; --pur:#9575cd; --pink:#f06292; --red:#ef5350;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       line-height:1.55}
+  code,.mono{font-family:var(--mono)}
+  code{background:#1b2432;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:.9em;color:#ffd479}
+
+  header{padding:56px 20px 34px;text-align:center;
+         background:radial-gradient(1200px 500px at 50% -10%, #16233a 0%, var(--bg) 60%)}
+  header h1{margin:0;font-size:clamp(25px,4vw,40px);letter-spacing:-.5px}
+  header h1 .n{color:var(--grn)}
+  header p{max-width:780px;margin:14px auto 0;color:var(--mut);font-size:17px}
+  header .fig{display:inline-block;margin-top:16px;font-size:13px;color:#7d8ea0;
+              border:1px solid var(--line);border-radius:99px;padding:4px 14px;background:#0e141c}
+
+  nav{position:sticky;top:0;z-index:50;background:rgba(10,14,19,.92);backdrop-filter:blur(8px);
+      border-bottom:1px solid var(--line);display:flex;gap:8px;justify-content:center;flex-wrap:wrap;padding:10px}
+  nav a{color:var(--mut);text-decoration:none;font-size:13.5px;padding:5px 12px;border-radius:99px;border:1px solid transparent}
+  nav a:hover{color:var(--txt);border-color:var(--line);background:var(--panel2)}
+
+  main{width:min(1080px,94vw);margin:0 auto;padding-bottom:40px}
+  section{margin-top:64px}
+  .kicker{color:var(--grn);font-family:var(--mono);font-size:13px;letter-spacing:2px;text-transform:uppercase}
+  h2{margin:6px 0 8px;font-size:clamp(21px,3vw,29px);letter-spacing:-.3px}
+  .sub{color:var(--mut);max-width:850px;margin:0 0 22px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+  .quote{border-left:4px solid var(--org);background:#171407;border-radius:0 10px 10px 0;
+         padding:14px 18px;color:#d8c9a3;font-size:14.5px;margin-top:16px}
+  .quote b{color:var(--org)}
+
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:99px;overflow:hidden;flex-wrap:wrap}
+  .seg button{background:transparent;color:var(--mut);border:0;padding:8px 16px;cursor:pointer;font-size:13.5px;font-family:inherit}
+  .seg button.on{background:var(--grn);color:#0b1206;font-weight:700}
+  .seg.bad button.on{background:var(--red);color:#fff}
+  .btn{background:var(--grn);color:#0b1206;font-weight:700;border:0;border-radius:99px;
+       padding:10px 20px;font-size:14.5px;cursor:pointer;transition:filter .15s, transform .05s;font-family:inherit}
+  .btn:hover{filter:brightness(1.1)}
+  .btn:active{transform:scale(.97)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn.ghost{background:transparent;color:var(--mut);border:1px solid var(--line);font-weight:500}
+
+  /* ---------- machine svg ---------- */
+  .mach-wrap svg{width:100%;height:auto;display:block}
+  .mach-wrap [data-part]{cursor:pointer;transition:filter .15s}
+  .mach-wrap [data-part]:hover{filter:brightness(1.35)}
+  .mach-wrap [data-part].sel{filter:brightness(1.35) drop-shadow(0 0 6px rgba(255,255,255,.25))}
+  #partPanel h3{margin:2px 0 4px;font-size:19px}
+  #partPanel .tag{font-family:var(--mono);font-size:13px;color:#ffd479;margin-bottom:10px;display:block}
+  #partPanel p{color:#c6d2de;margin:8px 0 0;font-size:15px}
+  .mach-grid{display:grid;grid-template-columns:1.25fr .75fr;gap:18px}
+  @media(max-width:880px){.mach-grid{grid-template-columns:1fr}}
+  .facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin-top:16px}
+  .fact{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px}
+  .fact b{display:block;font-size:21px;color:var(--grn);font-family:var(--mono)}
+  .fact span{color:var(--mut);font-size:12.5px}
+  .terms{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:820px){.terms{grid-template-columns:1fr}}
+  .term .tt{margin:0;font:inherit;white-space:pre;overflow-x:auto;color:#a8e0ff}
+  .cap{font-size:13px;color:var(--mut);margin-top:6px}
+  .gotchas{margin:0;padding-left:20px}
+  .gotchas li{margin:9px 0;color:#b9c6d3;font-size:14px}
+
+  /* ---------- placement lab ---------- */
+  .labctl{display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 14px;align-items:center}
+  .ctl{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--mut)}
+  #policyLine{font-family:var(--mono);font-size:13.5px;color:#ffd479;margin:4px 0 10px}
+  #verdict{margin-top:12px;padding:12px 16px;border-radius:10px;font-size:15px;border:1px solid var(--line)}
+  #verdict.good{background:#12240c;border-color:var(--grn);color:#c9e99a}
+  #verdict.warn{background:#251a08;border-color:var(--org);color:#ffd9a0}
+  #verdict.bad{background:#2a1114;border-color:var(--red);color:#ffb3b8}
+  #labLog{margin-top:12px;font-family:var(--mono);font-size:12.5px;color:var(--mut);max-height:110px;overflow-y:auto;
+          background:#0a0f15;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  #labLog .h0{color:#9ccc65} #labLog .h1{color:var(--org)} #labLog .h2{color:var(--red)}
+
+  /* ---------- numactl explorer ---------- */
+  .cmd{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-family:var(--mono);font-size:15px;margin:8px 0 14px}
+  .tok{padding:8px 13px;border-radius:8px;border:1px solid var(--line);background:#0e141c;cursor:pointer;
+       transition:all .15s;color:#c9d6e2}
+  .tok:hover{border-color:var(--pur)}
+  .tok.sel{border-color:var(--pur);background:#241d3a;color:#fff;box-shadow:0 0 14px -4px var(--pur)}
+  .tok .cmt{color:#5f7183}
+  #tokPanel{min-height:74px}
+  #tokPanel h4{margin:0 0 4px;font-size:16px;color:#c792ea}
+  #tokPanel p{margin:0;color:#b9c6d3;font-size:14.5px}
+  .fam{display:grid;grid-template-columns:1fr 60px 1fr;gap:8px;align-items:center;margin-top:6px}
+  @media(max-width:760px){.fam{grid-template-columns:1fr}}
+  .procbox{border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--panel2)}
+  .procbox .pt{font-weight:700;font-size:14.5px}
+  .procbox .pp{font-family:var(--mono);font-size:12.5px;color:var(--mut);margin-top:6px}
+  .pol{display:inline-block;font-family:var(--mono);font-size:11.5px;border-radius:99px;padding:2px 10px;margin:3px 4px 0 0}
+  .pol.ok{background:#12240c;color:#9ccc65;border:1px solid #33591a}
+  .pol.no{background:#2a1114;color:#ff8f96;border:1px solid #5b2027}
+  .fam-arrow{text-align:center;color:#3d4c5e;font-size:20px}
+  #spawnNote{display:none;margin-top:12px;color:#ffb3b8;font-size:13.5px;background:#2a1114;
+             border:1px solid #5b2027;border-radius:10px;padding:10px 14px}
+  .fam.spawn #spawnNote{display:block}
+
+  /* ---------- pinned vs pageable race ---------- */
+  .lane{margin:18px 0}
+  .lane-head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px}
+  .lane-head .lt{font-weight:700;font-size:15px}
+  .lane-head .ls{font-family:var(--mono);font-size:12.5px;color:var(--mut)}
+  .track{height:34px;border-radius:9px;background:#0a0f15;border:1px solid var(--line);overflow:hidden;margin-top:6px;position:relative}
+  .fill{height:100%;width:0%;transition:width .08s linear}
+  .fill.pin{background:linear-gradient(90deg,#2c4a12,#76b900)}
+  .fill.pag{background:linear-gradient(90deg,#4a2a10,#c77f2a)}
+  .stage{position:absolute;top:0;bottom:0;width:1px;background:#3d4c5e}
+  .verdict-line{font-family:var(--mono);font-size:13px;margin-top:6px;min-height:18px;color:#9ccc65}
+  .verdict-line.pag{color:#ffb350}
+  .why{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px}
+  @media(max-width:760px){.why{grid-template-columns:1fr}}
+  .why .panel h5{margin:0 0 8px;font-family:var(--mono);font-size:13px}
+  .why ul{margin:0;padding-left:18px;color:#b9c6d3;font-size:13.5px}
+  .why li{margin:6px 0}
+  .term{font-family:var(--mono);font-size:13px;background:#05080c;border:1px solid var(--line);
+        border-radius:10px;padding:14px 16px;margin-top:14px;color:#a8e0ff;overflow-x:auto}
+  .term .p{color:#5f7183}
+  .term .c{color:#4d7a99}
+
+  /* ---------- GPUDirect ---------- */
+  .gd-row{display:flex;align-items:center;gap:0;flex-wrap:wrap;margin:14px 0}
+  .gd-box{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:10px 14px;
+          text-align:center;min-width:104px;transition:all .4s}
+  .gd-box b{display:block;font-size:13.5px}
+  .gd-box small{color:var(--mut);font-size:11px}
+  .gd-arrow{padding:0 10px;color:#3d4c5e;font-size:15px;white-space:nowrap}
+  .gd .off-path .gd-arrow{color:#7a5b5b}
+  .gd .on-path{display:none}
+  .gd.on .on-path{display:flex;align-items:center;flex-wrap:wrap}
+  .gd.on .off-path{display:none}
+  .gd-direct{position:relative}
+  .gd-direct .gd-box{border-color:var(--grn);box-shadow:0 0 18px -6px var(--grn)}
+  .gd-lbl{font-family:var(--mono);font-size:11.5px;color:#9ccc65;flex-basis:100%;margin-top:4px;text-align:center}
+  .gd-title{font-family:var(--mono);font-size:12.5px;color:var(--mut);width:150px}
+
+  /* ---------- pin_memory + memlock ---------- */
+  .lock-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:18px}
+  @media(max-width:820px){.lock-grid{grid-template-columns:1fr}}
+  .code{font-family:var(--mono);font-size:13.5px;background:#05080c;border:1px solid var(--line);
+        border-radius:12px;padding:16px 18px;overflow-x:auto;line-height:1.8}
+  .code .cm{color:#4d7a99}
+  .code .kw{color:#c792ea}
+  .code .st{color:#a5e075}
+  .code .fn{color:#ffd479}
+  .code .hl{background:#1d2b12;border-radius:5px;padding:1px 6px;color:#c9e99a;border:1px solid #33591a}
+  .ann{font-size:13px;color:var(--mut);margin-top:10px;padding-left:14px;border-left:3px solid var(--grn)}
+  #memVerdict{margin-top:14px;padding:12px 16px;border-radius:10px;font-size:14.5px}
+  #memVerdict.ok{background:#12240c;border:1px solid var(--grn);color:#c9e99a}
+  #memVerdict.no{background:#2a1114;border:1px solid var(--red);color:#ffb3b8}
+  .ctl-label{font-size:13px;color:var(--mut);margin:12px 0 6px;font-family:var(--mono)}
+
+  footer{margin-top:70px;border-top:1px solid var(--line);padding:26px 20px;text-align:center;color:#66788c;font-size:13.5px}
+  footer .refs{font-family:var(--mono);font-size:12.5px;color:#4d5e70;margin-top:6px}
+  .glossary{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin-top:14px}
+  .g-item{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:13px}
+  .g-item b{color:var(--blu)}
+  .g-item span{color:var(--mut)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Keep memory close to the CPU, <span class="n">close to the GPU</span></h1>
+  <p>On a multi-socket server, a training step is only as fast as the path your data takes:
+     RAM → CPU → GPU. See what happens when that path stays inside one NUMA node — and when it doesn’t —
+     plus why pinned (page-locked) memory makes the final hop 2–3× faster.</p>
+  <span class="fig">interactive companion · NUMA-friendly allocation &amp; memory pinning (Figure 3-5)</span>
+</header>
+
+<nav>
+  <a href="#machine">① The machine</a>
+  <a href="#lab">② Placement lab</a>
+  <a href="#numactl">③ numactl &amp; inheritance</a>
+  <a href="#pinned">④ Pinned vs pageable</a>
+  <a href="#lock">⑤ pin_memory &amp; ulimit</a>
+  <a href="#field">⑥ Field guide</a>
+</nav>
+
+<main>
+
+<!-- ================= SECTION 1 : machine ================= -->
+<section id="machine">
+  <div class="kicker">01 — the two-socket server</div>
+  <h2>What “NUMA” actually looks like inside the box</h2>
+  <p class="sub">Each CPU socket owns a pool of <b>local RAM</b> and a set of PCIe-attached GPUs — together that’s a
+     <b>NUMA node</b>. The sockets are joined only by a narrow interconnect (UPI). Click any part of the machine.</p>
+  <div class="mach-grid">
+    <div class="panel mach-wrap" id="machExplore"></div>
+    <div class="panel" id="partPanel">
+      <h3 id="ppTitle"></h3>
+      <span class="tag" id="ppTag"></span>
+      <p id="ppDesc"></p>
+    </div>
+  </div>
+  <div class="facts">
+    <div class="fact"><b>~300–460 GB/s</b><span>local DDR5 bandwidth per socket (8–12 channels) — order of magnitude</span></div>
+    <div class="fact"><b>~40–80 GB/s</b><span>aggregate UPI bandwidth between sockets — the shared “long bridge”</span></div>
+    <div class="fact"><b>10 vs 21</b><span>typical numactl node distance, local vs remote ≈ 2.1× the access cost</span></div>
+  </div>
+</section>
+
+<!-- ================= SECTION 2 : placement lab ================= -->
+<section id="lab">
+  <div class="kicker">02 — the placement lab</div>
+  <h2>Where does your batch travel?</h2>
+  <p class="sub">Pick where the <b>process runs</b>, where its <b>memory</b> was allocated, and which <b>GPU</b> it uses —
+     then run a batch and watch the data path. Every crossing of the dashed UPI link is wasted time.</p>
+
+  <div class="panel">
+    <div class="labctl">
+      <div class="ctl">process pinned to
+        <div class="seg" id="segCpu"><button data-v="0">CPU 0 · node 0</button><button data-v="1" class="on">CPU 1 · node 1</button></div>
+      </div>
+      <div class="ctl">memory from
+        <div class="seg bad" id="segMem"><button data-v="0">node 0 RAM</button><button data-v="1" class="on">node 1 RAM</button></div>
+      </div>
+      <div class="ctl">GPU
+        <div class="seg" id="segGpu"><button data-v="1">GPU 1 · node 0</button><button data-v="5" class="on">GPU 5 · node 1</button></div>
+      </div>
+    </div>
+    <div class="labctl">
+      <button class="btn" id="labRun">▶ Run one batch</button>
+      <button class="btn ghost" id="preIdeal">✓ book example (all local)</button>
+      <button class="btn ghost" id="preLate">✗ memory allocated before pinning</button>
+      <button class="btn ghost" id="preMig">✗ scheduler migrated the thread</button>
+    </div>
+    <div id="policyLine"></div>
+    <div class="mach-wrap" id="machSim"></div>
+    <div id="verdict"></div>
+    <div id="labLog"></div>
+    <div class="quote">The general rule: <b>keep the memory close to the CPU, which is close to the GPU</b> —
+      then the whole chain of data movement (memory → CPU → GPU) stays inside a single NUMA node.</div>
+  </div>
+</section>
+
+<!-- ================= SECTION 3 : numactl ================= -->
+<section id="numactl">
+  <div class="kicker">03 — the command</div>
+  <h2>Annotating <code>numactl</code>, token by token</h2>
+  <p class="sub">This is the book’s example: pin CPU <i>and</i> memory to node 1, whose PCIe holds GPU 5.
+     Click each piece of the command.</p>
+  <div class="panel">
+    <div class="cmd" id="cmdTokens"></div>
+    <div id="tokPanel"><h4></h4><p></p></div>
+
+    <div class="ctl-label" style="margin-top:20px">child processes — how are your DataLoader workers created?</div>
+    <div class="seg" id="segSpawn" style="margin-top:6px">
+      <button data-v="fork" class="on">fork (Linux default)</button>
+      <button data-v="spawn">spawn / exec</button>
+    </div>
+    <div class="fam" id="famBox" style="margin-top:12px">
+      <div class="procbox">
+        <div class="pt">🧠 parent — python train.py</div>
+        <div class="pp">launched under: numactl --cpunodebind=1 --membind=1</div>
+        <span class="pol ok">cpunodebind=1 ✓</span><span class="pol ok">membind=1 ✓</span>
+      </div>
+      <div class="fam-arrow">⇢</div>
+      <div class="procbox">
+        <div class="pt">👷 workers ×4 (DataLoader)</div>
+        <div class="pp" id="workerPols"></div>
+      </div>
+    </div>
+    <div id="spawnNote">⚠ With the <b>spawn</b> start method (or any <code>exec</code>), children are fresh processes —
+      they do <b>not</b> inherit the parent’s NUMA policies. Re-apply the policy (or export the equivalent
+      environment variables) inside each worker. Heads-up: since <b>Python 3.14</b> the POSIX default is
+      <b>forkserver</b>, so even a “default” setup may no longer inherit — check what your DataLoader uses.</div>
+  </div>
+</section>
+
+<!-- ================= SECTION 4 : pinned vs pageable ================= -->
+<section id="pinned">
+  <div class="kicker">04 — figure 3-5, animated</div>
+  <h2>Pinned vs pageable memory: the H2D copy race</h2>
+  <p class="sub">Regular (pageable) memory can be swapped or moved by the OS, so the GPU can’t DMA from it directly —
+     the runtime secretly copies it through a pinned <b>staging buffer</b> first. Pinned memory skips that step.</p>
+  <div class="panel">
+    <button class="btn" id="raceBtn">⚡ Transfer 1 GB to the GPU</button>
+
+    <div class="lane">
+      <div class="lane-head"><span class="lt">🟩 pinned (page-locked) RAM — <code>pin_memory=True</code></span>
+        <span class="ls" id="pinStage">idle</span></div>
+      <div class="track"><div class="fill pin" id="pinFill"></div></div>
+      <div class="verdict-line" id="pinVerdict"></div>
+    </div>
+
+    <div class="lane">
+      <div class="lane-head"><span class="lt">🟧 ordinary pageable RAM</span>
+        <span class="ls" id="pagStage">idle</span></div>
+      <div class="track"><div class="fill pag" id="pagFill"></div><div class="stage" style="left:45%"></div></div>
+      <div class="verdict-line pag" id="pagVerdict"></div>
+    </div>
+
+    <div class="why">
+      <div class="panel">
+        <h5 style="color:#9ccc65">why pinned wins</h5>
+        <ul>
+          <li>OS <b>can’t swap or move</b> page-locked memory → the GPU (or NIC) can <b>DMA directly</b> from it.</li>
+          <li>Host→device copies can be <b>2–3× faster</b> than from pageable memory.</li>
+          <li><code>cudaMemcpyAsync</code> genuinely overlaps the copy with GPU compute (no hidden sync).</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h5 style="color:#ffb350">why pageable loses</h5>
+        <ul>
+          <li>DMA can’t touch memory the OS might relocate → runtime copies through a pinned <b>staging buffer</b> (extra CPU copy).</li>
+          <li>Extra <b>synchronization</b> reduces overlap of copies with GPU work.</li>
+          <li>Biggest penalty with <b>large batch sizes</b> or when H2D copies are on the critical path.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="term">
+      <span class="p"># try it on your machine — CUDA utilities</span><br>
+      $ bandwidthTest --memory=<span class="fn">pinned</span>&nbsp;&nbsp;&nbsp;<span class="c">→  ~25 GB/s &nbsp;(80–90% of PCIe 4.0 ×16’s 32 GB/s)</span><br>
+      $ bandwidthTest --memory=<span class="fn">pageable</span>&nbsp;<span class="c">→  ~10–13 GB/s &nbsp;on the very same machine</span><br>
+      <span class="p"># rule of thumb: 2–3× (the book’s figure). On fast modern CPUs the gap narrows —</span><br>
+      <span class="p"># but only pinned memory enables true async overlap (cudaMemcpyAsync / non_blocking)</span>
+    </div>
+
+    <div class="ctl-label" style="margin-top:22px">the same idea, end-to-end: GPUDirect</div>
+    <div class="gd" id="gdBox">
+      <div class="labctl" style="margin-top:6px">
+        <div class="seg" id="segGd">
+          <button data-v="off" class="on">GPUDirect OFF</button>
+          <button data-v="on">GPUDirect ON</button>
+        </div>
+        <span style="font-size:13px;color:var(--mut)">NICs and NVMe drives talking straight to GPU memory — no CPU round-trip.</span>
+      </div>
+      <div class="off-path">
+        <div class="gd-row"><span class="gd-title">storage · load batch</span>
+          <div class="gd-box"><b>💽 NVMe</b><small>dataset</small></div><span class="gd-arrow">→</span>
+          <div class="gd-box"><b>🧺 RAM</b><small>bounce buffer</small></div><span class="gd-arrow">→</span>
+          <div class="gd-box"><b>🖥️ CPU</b><small>copies every byte</small></div><span class="gd-arrow">→</span>
+          <div class="gd-box"><b>🎮 GPU</b><small>HBM</small></div>
+        </div>
+        <div class="gd-row"><span class="gd-title">network · all-reduce</span>
+          <div class="gd-box"><b>🌐 NIC</b><small>InfiniBand</small></div><span class="gd-arrow">→</span>
+          <div class="gd-box"><b>🧺 RAM</b><small>bounce buffer</small></div><span class="gd-arrow">→</span>
+          <div class="gd-box"><b>🖥️ CPU</b><small>copies every byte</small></div><span class="gd-arrow">→</span>
+          <div class="gd-box"><b>🎮 GPU</b><small>HBM</small></div>
+        </div>
+        <div class="ann">Every byte bounces through host RAM and the CPU — extra copies, extra latency.</div>
+      </div>
+      <div class="on-path">
+        <div class="gd-row gd-direct"><span class="gd-title">GPUDirect Storage</span>
+          <div class="gd-box"><b>💽 NVMe</b><small>dataset</small></div>
+          <span class="gd-arrow" style="color:var(--grn);font-size:22px">════════▶</span>
+          <div class="gd-box"><b>🎮 GPU</b><small>streams straight into HBM</small></div>
+          <span class="gd-lbl">NVMe → GPU memory, bypassing the CPU entirely</span>
+        </div>
+        <div class="gd-row gd-direct"><span class="gd-title">GPUDirect RDMA</span>
+          <div class="gd-box"><b>🎮 GPU</b><small>HBM</small></div>
+          <span class="gd-arrow" style="color:var(--grn);font-size:22px">◀═══════▶</span>
+          <div class="gd-box"><b>🌐 NIC</b><small>InfiniBand → peer GPU</small></div>
+          <span class="gd-lbl">NIC exchanges data directly with GPU memory</span>
+        </div>
+        <div class="ann" style="border-color:var(--grn)">Direct DMA paths — the CPU is freed to do real work.
+          Enable on supported hardware to cut data-transfer latency.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= SECTION 5 : pin_memory + ulimit ================= -->
+<section id="lock">
+  <div class="kicker">05 — put it into practice</div>
+  <h2><code>pin_memory=True</code> — and the limit that can bite you</h2>
+  <p class="sub">Frameworks expose pinning as a one-liner. But the OS caps how much memory a user may lock
+     (<code>ulimit -l</code>) — ask for more pinned memory than the cap allows and the allocation fails.</p>
+  <div class="lock-grid">
+    <div class="panel">
+      <div class="code">
+<span class="cm"># PyTorch DataLoader — batches land in page-locked (pinned) RAM</span><br>
+loader = <span class="fn">DataLoader</span>(dataset,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; batch_size=<span class="st">256</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; num_workers=<span class="st">4</span>,&nbsp;&nbsp;&nbsp;<span class="cm"># fork-based → inherits NUMA policy</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="hl">pin_memory=True</span>)&nbsp;<span class="cm"># ← the flag that matters</span><br>
+<br>
+<span class="kw">for</span> x, y <span class="kw">in</span> loader:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;x = x.<span class="fn">to</span>(<span class="st">"cuda"</span>, <span class="hl">non_blocking=True</span>)&nbsp;<span class="cm"># fast async DMA</span>
+      </div>
+      <div class="ann">Pinned memory + <code>non_blocking=True</code> lets the H2D copy overlap with GPU compute —
+        most visible with large batches or when copies sit on the critical path.</div>
+    </div>
+    <div class="panel">
+      <div class="ctl-label">pinned buffers you want (DataLoader, caches…)</div>
+      <div class="seg" id="segNeed">
+        <button data-v="8">8 GB</button><button data-v="16" class="on">16 GB</button>
+        <button data-v="32">32 GB</button><button data-v="64">64 GB</button>
+      </div>
+      <div class="ctl-label">ulimit -l — max locked memory</div>
+      <div class="seg bad" id="segUlimit">
+        <button data-v="0.0625">64 MB <span style="opacity:.7">(typical default)</span></button>
+        <button data-v="8">8 GB</button><button data-v="64">64 GB</button><button data-v="1e9">unlimited</button>
+      </div>
+      <div id="memVerdict"></div>
+      <div class="term" style="margin-top:14px">
+        <span class="p"># raise the cap</span><br>
+        $ ulimit -l unlimited<br>
+        <span class="p"># docker: adjust the container’s limits</span><br>
+        $ docker run <span class="fn">--ulimit memlock=-1</span> …<br>
+        <span class="p"># k8s: raise memlock in the securityContext</span>
+      </div>
+    </div>
+  </div>
+  <div class="quote" style="margin-top:18px"><b>Rules of thumb:</b> keep memory, process and GPU on one NUMA node
+    (<code>numactl --cpunodebind=N --membind=N</code>, fork-based workers) · set <code>pin_memory=True</code> on data
+    loaders · enable GPUDirect RDMA / GDS on supported hardware · set <code>ulimit -l</code> (memlock) to unlimited
+    for AI/HPC workloads.</div>
+</section>
+
+<!-- ================= SECTION 6 : field guide ================= -->
+<section id="field">
+  <div class="kicker">06 — field guide</div>
+  <h2>Inspect your own machine</h2>
+  <p class="sub">Everything above is discoverable in five minutes on any GPU node. These four commands tell you
+     the topology, the price of crossing it, which GPU belongs to which node, and whether your pinning actually worked.
+     (Outputs below are illustrative.)</p>
+
+  <div class="terms">
+    <div>
+      <div class="term"><pre class="tt">$ lscpu | grep -i numa
+NUMA node(s):        2
+NUMA node0 CPU(s):   0-31,64-95
+NUMA node1 CPU(s):   32-63,96-127</pre></div>
+      <div class="cap">How many nodes exist and which cores belong to each — these ranges are what you pin to with
+        <code>--cpunodebind</code>. No “NUMA” lines? It’s a single-socket box and none of this section applies.</div>
+    </div>
+    <div>
+      <div class="term"><pre class="tt">$ numactl --hardware
+available: 2 nodes (0-1)
+…
+node distances:
+node   0   1
+  0:  10  21
+  1:  21  10</pre></div>
+      <div class="cap">The firmware’s price list (ACPI SLIT table): local access costs <b>10</b>, remote costs <b>21</b> —
+        i.e. ~2.1× per remote access. This is exactly the penalty the placement lab is fighting.</div>
+    </div>
+    <div>
+      <div class="term"><pre class="tt">$ nvidia-smi topo -m
+       GPU0  GPU1  GPU4  GPU5  CPU Affinity   NUMA Affinity
+GPU0     X    PIX   SYS   SYS   0-31,64-95        0
+GPU1    PIX    X    SYS   SYS   0-31,64-95        0
+GPU4    SYS   SYS    X    NV2   32-63,96-127      1
+GPU5    SYS   SYS   NV2    X    32-63,96-127      1
+
+NV# NVLink · PIX same PCIe switch · PHB host bridge
+NODE same NUMA node · SYS across sockets (UPI)</pre></div>
+      <div class="cap">The placement matrix: choose <code>--gpu N</code> so its <b>NUMA affinity</b> matches your
+        <code>--cpunodebind</code>. GPU↔GPU pairs marked <b>SYS</b> (like GPU 1 ↔ GPU 5) can only talk across the
+        UPI link — avoid those pairings for heavy P2P traffic.</div>
+    </div>
+    <div>
+      <div class="term"><pre class="tt">$ numastat -p $(pgrep -f train.py)
+Per-node process memory usage (MB):
+          node0   node1   Total
+Total:     1024   48896   49920
+numa_hit  ████████████████ 98.7%
+numa_miss ▌ 1.3%</pre></div>
+      <div class="cap">The report card after launch: <code>numa_hit</code> = memory served by the right node.
+        A growing <code>numa_miss</code> means remote traffic — your binding isn’t doing its job. Re-check after
+        any scheduler or config change.</div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px">
+    <h4 style="margin:0 0 10px;font-size:16px">⚠️ Gotchas worth knowing</h4>
+    <ul class="gotchas">
+      <li><b><code>--membind</code> is strict</b> — if that node’s RAM runs out, allocation simply fails (OOM).
+        <code>--preferred</code> is the forgiving sibling: try node 1 first, quietly fall back elsewhere. Start with
+        <code>--preferred</code>, graduate to <code>--membind</code> once you trust the setup.</li>
+      <li><b><code>taskset</code> / docker <code>--cpuset-cpus</code> bind CPU only</b> — memory still follows
+        first-touch. Pair them with <code>--cpuset-mems</code> (or <code>numactl --membind</code>) for the memory half
+        of the policy.</li>
+      <li><b>Python ≥ 3.14 gotcha:</b> the POSIX default multiprocessing start method changed from <b>fork</b> to
+        <b>forkserver</b> — newly launched DataLoader workers may silently stop inheriting your NUMA policies.
+        Set the start method explicitly (<code>mp.get_context("fork")</code> for CPU-only workers) or re-apply the
+        policy inside each worker.</li>
+      <li><b>GPUDirect doesn’t configure itself:</b> RDMA needs the <code>nvidia-peermem</code> kernel module loaded;
+        GDS rides on the <code>cuFile</code> API + <code>nvidia-fs</code> driver. Verify they exist in your container
+        image before counting on direct paths.</li>
+      <li><b>Pinned memory is a budget, not a free lunch</b> — pinned pages can never be swapped or used by anything
+        else on the host. Size DataLoader buffers deliberately, and keep <code>ulimit -l</code> above that budget
+        (section ⑤).</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= GLOSSARY ================= -->
+<section>
+  <div class="kicker">mini-glossary</div>
+  <h2>Words this section keeps using</h2>
+  <div class="glossary">
+    <div class="g-item"><b>NUMA node</b> <span>— a CPU socket + its local RAM + its PCIe devices. Access is fast inside, slow across.</span></div>
+    <div class="g-item"><b>first-touch policy</b> <span>— memory is allocated from the node of the CPU that first touches it (where the thread runs).</span></div>
+    <div class="g-item"><b>UPI</b> <span>— Ultra Path Interconnect; the glue between sockets. Every cross-node hop pays latency.</span></div>
+    <div class="g-item"><b>pinned / page-locked memory</b> <span>— host RAM the OS promises never to swap or move; DMA-friendly.</span></div>
+    <div class="g-item"><b>pageable memory</b> <span>— ordinary malloc’d RAM; can be moved, so DMA needs a staging copy.</span></div>
+    <div class="g-item"><b>DMA</b> <span>— direct memory access; a device moves data without the CPU touching each byte.</span></div>
+    <div class="g-item"><b>H2D / D2H</b> <span>— host-to-device / device-to-host copies over PCIe.</span></div>
+    <div class="g-item"><b>GPUDirect RDMA</b> <span>— NIC (e.g. InfiniBand) reads/writes GPU memory directly.</span></div>
+    <div class="g-item"><b>GPUDirect Storage (GDS)</b> <span>— NVMe streams data straight into GPU memory.</span></div>
+    <div class="g-item"><b>memlock</b> <span>— the OS limit on how much memory a user may pin (ulimit -l / docker --ulimit memlock).</span></div>
+    <div class="g-item"><b>node distance</b> <span>— numactl’s relative cost of memory access: local = 10, remote often 21 ⇒ ≈2.1×.</span></div>
+    <div class="g-item"><b>numa_hit / numa_miss</b> <span>— numastat counters: allocations served by the right vs wrong node.</span></div>
+    <div class="g-item"><b>NVLink</b> <span>— NVIDIA’s GPU↔GPU interconnect; shows up as NV# in nvidia-smi topo -m.</span></div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  Study companion for the NUMA-friendly allocation &amp; memory-pinning section.
+  <div class="refs">CUDA programming &amp; optimization → Ch. 4–5 · PyTorch optimizations → Ch. 9</div>
+</footer>
+
+<script>
+/* ============ shared: the machine diagram ============ */
+const A = {
+  ram0:[123,122], cpu0:[333,122], gpu0:[133,270], gpu1:[333,270],
+  ram1:[847,122], cpu1:[647,122], gpu4:[647,270], gpu5:[857,270],
+  upi:[490,122],  upi2:[490,200]
+};
+function machineSVG(pfx, interactive){
+  const N0='#0e2436', N1='#12240c';
+  const coreGrid=c=>{ let s='';
+    for(let i=0;i<16;i++){
+      const x=c[0]-90+16+(i%4)*44, y=c[1]-44+14+Math.floor(i/4)*27;
+      s+=`<rect x="${x}" y="${y}" width="34" height="19" rx="3" fill="#22303f" stroke="#33465c"/>`;
+    } return s; };
+  const cores0=coreGrid(A.cpu0), cores1=coreGrid(A.cpu1);
+  const dimmRow=r=>{ let s='';
+    for(let i=0;i<3;i++){
+      const x=r[0]-72+i*50;
+      s+=`<rect x="${x}" y="${r[1]-46}" width="38" height="92" rx="4" fill="#1c2a3a" stroke="#33465c"/>
+          <rect x="${x+6}" y="${r[1]-40}" width="26" height="12" rx="2" fill="#33465c"/>`;
+    } return s; };
+  const dimms0=dimmRow(A.ram0), dimms1=dimmRow(A.ram1);
+  const box=(id,label,sub,x,y,w,h,stroke)=>`
+    <g data-part="${id}" id="${pfx}-${id}">
+      <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" fill="#131b26" stroke="${stroke}" stroke-width="1.6"/>
+      <text x="${x+w/2}" y="${y+24}" text-anchor="middle" fill="#e8eef4" font-size="15" font-weight="700" font-family="ui-monospace,Menlo,monospace">${label}</text>
+      <text x="${x+w/2}" y="${y+42}" text-anchor="middle" fill="#94a3b3" font-size="11" font-family="ui-monospace,Menlo,monospace">${sub}</text>
+    </g>`;
+  return `
+  <svg viewBox="0 0 980 352" xmlns="http://www.w3.org/2000/svg">
+    <rect x="18"  y="28" width="430" height="310" rx="14" fill="${N0}" stroke="#2b4a66"/>
+    <text x="38"  y="52" fill="#4fc3f7" font-size="13" font-weight="700" font-family="ui-monospace,Menlo,monospace">NUMA NODE 0 · socket 0</text>
+    <rect x="532" y="28" width="430" height="310" rx="14" fill="${N1}" stroke="#3a5b1e"/>
+    <text x="552" y="52" fill="#76b900" font-size="13" font-weight="700" font-family="ui-monospace,Menlo,monospace">NUMA NODE 1 · socket 1</text>
+
+    <line x1="${A.cpu0[0]}" y1="${A.cpu0[1]+60}" x2="${A.gpu0[0]}" y2="${A.gpu0[1]-38}" stroke="#26374a" stroke-width="3"/>
+    <line x1="${A.cpu0[0]}" y1="${A.cpu0[1]+60}" x2="${A.gpu1[0]}" y2="${A.gpu1[1]-38}" stroke="#26374a" stroke-width="3"/>
+    <line x1="${A.cpu1[0]}" y1="${A.cpu1[1]+60}" x2="${A.gpu4[0]}" y2="${A.gpu4[1]-38}" stroke="#26374a" stroke-width="3"/>
+    <line x1="${A.cpu1[0]}" y1="${A.cpu1[1]+60}" x2="${A.gpu5[0]}" y2="${A.gpu5[1]-38}" stroke="#26374a" stroke-width="3"/>
+
+    <g data-part="cpu0" id="${pfx}-cpu0">
+      <rect x="${A.cpu0[0]-90}" y="${A.cpu0[1]-60}" width="180" height="120" rx="10" fill="#131b26" stroke="#4fc3f7" stroke-width="1.6"/>
+      ${cores0}
+      <text x="${A.cpu0[0]}" y="${A.cpu0[1]+52}" text-anchor="middle" fill="#4fc3f7" font-size="13" font-weight="700" font-family="ui-monospace,Menlo,monospace">CPU 0</text>
+    </g>
+    <g data-part="cpu1" id="${pfx}-cpu1">
+      <rect x="${A.cpu1[0]-90}" y="${A.cpu1[1]-60}" width="180" height="120" rx="10" fill="#131b26" stroke="#76b900" stroke-width="1.6"/>
+      ${cores1}
+      <text x="${A.cpu1[0]}" y="${A.cpu1[1]+52}" text-anchor="middle" fill="#76b900" font-size="13" font-weight="700" font-family="ui-monospace,Menlo,monospace">CPU 1</text>
+    </g>
+
+    <g data-part="ram0" id="${pfx}-ram0">
+      <rect x="${A.ram0[0]-80}" y="${A.ram0[1]-60}" width="160" height="120" rx="10" fill="#101a26" stroke="#4fc3f7" stroke-width="1.2"/>
+      ${dimms0}
+      <text x="${A.ram0[0]}" y="${A.ram0[1]+52}" text-anchor="middle" fill="#7fb7d9" font-size="12" font-weight="700" font-family="ui-monospace,Menlo,monospace">RAM 0</text>
+    </g>
+    <g data-part="ram1" id="${pfx}-ram1">
+      <rect x="${A.ram1[0]-80}" y="${A.ram1[1]-60}" width="160" height="120" rx="10" fill="#0f1c0e" stroke="#76b900" stroke-width="1.2"/>
+      ${dimms1}
+      <text x="${A.ram1[0]}" y="${A.ram1[1]+52}" text-anchor="middle" fill="#a4cf6b" font-size="12" font-weight="700" font-family="ui-monospace,Menlo,monospace">RAM 1</text>
+    </g>
+
+    <g data-part="upi" id="${pfx}-upi">
+      <line x1="428" y1="${A.upi[1]}" x2="552" y2="${A.upi[1]}" stroke="#ef5350" stroke-width="3" stroke-dasharray="8 6"/>
+      <text x="490" y="${A.upi[1]-12}" text-anchor="middle" fill="#ef5350" font-size="12" font-weight="700" font-family="ui-monospace,Menlo,monospace">UPI</text>
+    </g>
+
+    ${box('gpu0','GPU 0','PCIe · node 0',A.gpu0[0]-95,A.gpu0[1]-38,190,76,'#2b4a66')}
+    ${box('gpu1','GPU 1','PCIe · node 0',A.gpu1[0]-95,A.gpu1[1]-38,190,76,'#2b4a66')}
+    ${box('gpu4','GPU 4','PCIe · node 1',A.gpu4[0]-95,A.gpu4[1]-38,190,76,'#3a5b1e')}
+    ${box('gpu5','GPU 5','PCIe · node 1',A.gpu5[0]-95,A.gpu5[1]-38,190,76,'#3a5b1e')}
+
+    <g id="${pfx}-lines"></g>
+    <circle id="${pfx}-dot" r="9" cx="${A.ram1[0]}" cy="${A.ram1[1]}" fill="#ffb350" opacity="0"
+            style="filter:drop-shadow(0 0 6px #ffb350)"/>
+  </svg>`;
+}
+
+/* ============ section 1 : explore ============ */
+document.getElementById('machExplore').innerHTML = machineSVG('ex', true);
+const PARTINFO = {
+  cpu0:['CPU 0 — socket 0','first-touch allocation','By default, a process allocates memory from the NUMA node of the CPU it currently runs on. Pin a process to this node (--cpunodebind=0) and its memory naturally comes from RAM 0 — the ideal case. But if the scheduler migrates the thread, or memory was allocated before pinning, the process can end up using remote memory.'],
+  cpu1:['CPU 1 — socket 1','first-touch allocation','Same rule on the second socket. The book\'s example pins here: --cpunodebind=1, with memory forced from node 1 (--membind=1) and GPU 5 — which hangs off socket 1 — doing the training.'],
+  ram0:['RAM 0 — node 0 local memory','fast only for socket 0','This DDR pool is directly attached to CPU 0. Access from socket 1 must hop the UPI interconnect — extra latency on every single access. --membind exists to make sure allocations come from the pool you want.'],
+  ram1:['RAM 1 — node 1 local memory','fast only for socket 1','If your process runs on CPU 1, you want its batches here. A process on node 0 reading from this pool pays the cross-node penalty — which negates the benefit of CPU pinning.'],
+  upi:['UPI interconnect','the cross-node hop','The only bridge between sockets (AMD\'s equivalent: Infinity Fabric). Every memory access that crosses it competes for this narrow link. Zero crossings = the whole memory → CPU → GPU chain stays local.'],
+  gpu0:['GPU 0','PCIe-attached to node 0','GPUs hang off their socket\'s PCIe lanes. Best throughput when the process, its pinned memory, and the GPU all live on the same node — then data flows RAM → CPU → GPU without leaving home.'],
+  gpu1:['GPU 1','PCIe-attached to node 0','Picking a GPU on node 0 while your process/memory live on node 1 forces every batch across the interconnect. Match --gpu N to the node you pinned.'],
+  gpu4:['GPU 4','PCIe-attached to node 1','One of node 1\'s GPUs. Note that PCIe goes through this socket — so its DMA transfers want source memory on node 1 too.'],
+  gpu5:['GPU 5','PCIe-attached to node 1','The GPU in the book\'s example (--gpu 5). Together with --cpunodebind=1 --membind=1, the entire data chain lives inside NUMA node 1.']
+};
+function pickPart(id, el){
+  document.querySelectorAll('#machExplore [data-part]').forEach(x=>x.classList.remove('sel'));
+  if(el) el.classList.add('sel');
+  const [t,g,d]=PARTINFO[id];
+  ppTitle.textContent=t; ppTag.textContent=g; ppDesc.textContent=d;
+}
+const ppTitle=document.getElementById('ppTitle'), ppTag=document.getElementById('ppTag'), ppDesc=document.getElementById('ppDesc');
+document.querySelectorAll('#machExplore [data-part]').forEach(el=>{
+  el.addEventListener('click',()=>pickPart(el.dataset.part, el));
+});
+pickPart('upi', document.querySelector('#machExplore [data-part="upi"]'));
+
+/* ============ section 2 : placement lab ============ */
+document.getElementById('machSim').innerHTML = machineSVG('sim', false);
+const lab={cpu:1, mem:1, gpu:5, running:false, batch:0};
+const simLines=document.getElementById('sim-lines'), simDot=document.getElementById('sim-dot'),
+      policyLine=document.getElementById('policyLine'), verdictEl=document.getElementById('verdict'),
+      labLog=document.getElementById('labLog');
+
+function segWire(id, key, fn){
+  document.querySelectorAll('#'+id+' button').forEach(b=>{
+    b.addEventListener('click',()=>{
+      document.querySelectorAll('#'+id+' button').forEach(x=>x.classList.remove('on'));
+      b.classList.add('on');
+      lab[key]= isNaN(+b.dataset.v) ? b.dataset.v : +b.dataset.v;
+      if(fn) fn();
+    });
+  });
+}
+function setSeg(id, v){
+  document.querySelectorAll('#'+id+' button').forEach(b=>b.classList.toggle('on', b.dataset.v==v));
+}
+function refreshPolicy(){
+  const gnode = lab.gpu===1?0:1;
+  policyLine.textContent =
+    `policy →  process: CPU ${lab.cpu} (node ${lab.cpu})   ·   memory: node ${lab.mem} RAM   ·   device: GPU ${lab.gpu} (node ${gnode})`;
+}
+function pathPoints(){
+  const gnode = lab.gpu===1?0:1, pts=[{p:A['ram'+lab.mem], cross:false}];
+  if(lab.mem!==lab.cpu) pts.push({p:A.upi, cross:true});
+  pts.push({p:A['cpu'+lab.cpu], cross:false});
+  if(gnode!==lab.cpu){ pts.push({p:A.upi2, cross:true}); }
+  pts.push({p:A['gpu'+lab.gpu], cross:false});
+  return pts;
+}
+function drawPath(pts){
+  simLines.innerHTML='';
+  for(let i=0;i<pts.length-1;i++){
+    const L=document.createElementNS('http://www.w3.org/2000/svg','line');
+    L.setAttribute('x1',pts[i].p[0]);   L.setAttribute('y1',pts[i].p[1]);
+    L.setAttribute('x2',pts[i+1].p[0]); L.setAttribute('y2',pts[i+1].p[1]);
+    L.setAttribute('stroke', pts[i+1].cross ? '#ef5350' : '#76b900');
+    L.setAttribute('stroke-width','3.5'); L.setAttribute('stroke-dasharray','7 6'); L.setAttribute('opacity','.55');
+    simLines.appendChild(L);
+  }
+}
+function animDot(pts, done){
+  const segs=[]; let total=0;
+  for(let i=0;i<pts.length-1;i++){
+    const dx=pts[i+1].p[0]-pts[i].p[0], dy=pts[i+1].p[1]-pts[i].p[1], len=Math.hypot(dx,dy)||0.001;
+    segs.push({x1:pts[i].p[0],y1:pts[i].p[1],x2:pts[i+1].p[0],y2:pts[i+1].p[1],len,cross:pts[i+1].cross});
+    total+=len;
+  }
+  const SPEED=340; let start=null, segIdx=0;
+  simDot.setAttribute('opacity','1'); simDot.setAttribute('fill','#ffb350');
+  function frame(now){
+    if(start===null) start=now;
+    const dist=Math.min((now-start)/1000*SPEED, total);
+    let acc=0, i=0;
+    while(i<segs.length-1 && acc+segs[i].len<dist){acc+=segs[i].len;i++;}
+    const t=Math.min((dist-acc)/segs[i].len,1);
+    simDot.setAttribute('cx', segs[i].x1+(segs[i].x2-segs[i].x1)*t);
+    simDot.setAttribute('cy', segs[i].y1+(segs[i].y2-segs[i].y1)*t);
+    simDot.setAttribute('fill', segs[i].cross ? '#ef5350' : '#ffb350');
+    if(dist<total){ requestAnimationFrame(frame); } else { simDot.setAttribute('fill','#76b900'); if(done)done(); }
+  }
+  requestAnimationFrame(frame);
+}
+function runLab(){
+  if(lab.running) return; lab.running=true;
+  refreshPolicy();
+  const pts=pathPoints(); drawPath(pts);
+  const hops=pts.filter(p=>p.cross).length;
+  const gnode = lab.gpu===1?0:1;
+  const j = [`RAM ${lab.mem}`]; if(lab.mem!==lab.cpu) j.push('UPI ⚡'); j.push(`CPU ${lab.cpu}`);
+  if(gnode!==lab.cpu) j.push('UPI ⚡'); j.push(`GPU ${lab.gpu}`);
+  animDot(pts, ()=>{
+    lab.batch++;
+    const line=document.createElement('div'); line.className='h'+hops;
+    line.textContent=`batch ${lab.batch}:  ${j.join(' → ')}   ·   UPI hops: ${hops}`;
+    labLog.appendChild(line); labLog.scrollTop=labLog.scrollHeight;
+    if(hops===0){ verdictEl.className='good';
+      verdictEl.innerHTML=`✓ <b>All local.</b> Memory → CPU → GPU never leaves node ${lab.cpu}. This is what <code>--cpunodebind=${lab.cpu} --membind=${lab.cpu} --gpu ${lab.gpu}</code> buys you — baseline speed.`; }
+    else if(hops===1){ verdictEl.className='warn';
+      verdictEl.innerHTML=`⚡ <b>1 UPI hop.</b> ${lab.mem!==lab.cpu?'Memory sits on the other node — every access hops the interconnect.':'The GPU hangs off the other node — every batch crosses over.'} Pinning benefit negated — each access now pays the node-distance penalty (local 10 vs remote 21 ⇒ ≈2× cost).`; }
+    else { verdictEl.className='bad';
+      verdictEl.innerHTML=`✗ <b>2 UPI hops — worst case.</b> Thread migrated off its node and the GPU is remote too: data crosses the fabric twice per batch.`; }
+    lab.running=false;
+  });
+}
+segWire('segCpu','cpu',refreshPolicy); segWire('segMem','mem',refreshPolicy); segWire('segGpu','gpu',refreshPolicy);
+document.getElementById('labRun').addEventListener('click',runLab);
+document.getElementById('preIdeal').addEventListener('click',()=>{lab.cpu=1;lab.mem=1;lab.gpu=5;setSeg('segCpu',1);setSeg('segMem',1);setSeg('segGpu',5);runLab();});
+document.getElementById('preLate').addEventListener('click',()=>{lab.cpu=1;lab.mem=0;lab.gpu=5;setSeg('segCpu',1);setSeg('segMem',0);setSeg('segGpu',5);runLab();});
+document.getElementById('preMig') .addEventListener('click',()=>{lab.cpu=0;lab.mem=1;lab.gpu=5;setSeg('segCpu',0);setSeg('segMem',1);setSeg('segGpu',5);runLab();});
+refreshPolicy();
+
+/* ============ section 3 : numactl tokens ============ */
+const TOKS=[
+  ['numactl','numactl','Runs a program under an explicit NUMA policy — both CPU binding and memory binding are applied to the launched process (and inherited by its fork children).'],
+  ['--cpunodebind=1','--cpunodebind=1','Pin the process to the CPU cores of NUMA node 1. The scheduler can no longer migrate it to the other socket.'],
+  ['--membind=1','--membind=1','Strict: allocate memory only from node 1\'s local RAM — even if the default first-touch policy would have chosen elsewhere.'],
+  ['python train.py','python train.py','Your training script — now guaranteed to run on node 1 with node 1 memory.'],
+  ['--gpu 5','--gpu 5','(App argument) use GPU 5, which hangs off node 1\'s PCIe. Process, memory and device are all on one node — the whole data chain is local.'],
+  ['&','&','Run in the background — classic for launching one trainer per GPU, each with its own NUMA binding.']
+];
+const cmdEl=document.getElementById('cmdTokens'), tokH=document.querySelector('#tokPanel h4'),
+      tokP=document.querySelector('#tokPanel p');
+TOKS.forEach(([txt,t,d],i)=>{
+  const s=document.createElement('span'); s.className='tok'+(i===0?' sel':''); s.textContent=txt;
+  s.addEventListener('click',()=>{
+    document.querySelectorAll('.tok').forEach(x=>x.classList.remove('sel')); s.classList.add('sel');
+    tokH.textContent=t; tokP.textContent=d;
+  });
+  cmdEl.appendChild(s);
+});
+tokH.textContent=TOKS[0][1]; tokP.textContent=TOKS[0][2];
+
+function famWire(v){
+  document.querySelectorAll('#segSpawn button').forEach(b=>b.classList.toggle('on',b.dataset.v===v));
+  const fork = v==='fork';
+  document.getElementById('famBox').classList.toggle('spawn',!fork);
+  document.getElementById('workerPols').innerHTML = fork
+    ? '<span class="pol ok">cpunodebind=1 ✓</span><span class="pol ok">membind=1 ✓</span>'
+    : '<span class="pol no">cpunodebind ✗</span><span class="pol no">membind ✗</span>';
+}
+document.querySelectorAll('#segSpawn button').forEach(b=>b.addEventListener('click',()=>famWire(b.dataset.v)));
+famWire('fork');
+
+/* ============ section 4 : race ============ */
+const raceBtn=document.getElementById('raceBtn'),
+      pinFill=document.getElementById('pinFill'), pagFill=document.getElementById('pagFill'),
+      pinStage=document.getElementById('pinStage'), pagStage=document.getElementById('pagStage'),
+      pinVerdict=document.getElementById('pinVerdict'), pagVerdict=document.getElementById('pagVerdict');
+let racing=false;
+function setStage(el,txt,col){el.textContent=txt; el.style.color=col||'#94a3b3';}
+document.getElementById('raceBtn').addEventListener('click',()=>{
+  if(racing) return; racing=true; raceBtn.disabled=true;
+  pinFill.style.width='0%'; pagFill.style.width='0%';
+  pinVerdict.textContent=''; pagVerdict.textContent='';
+  setStage(pinStage,'DMA: pinned RAM → GPU (CPU free to overlap)','#9ccc65');
+  const Dpin=3400, Dpag=8000, SPLIT=0.45, t0=performance.now();
+  function frame(now){
+    const e=now-t0;
+    pinFill.style.width=Math.min(e/Dpin*100,100)+'%';
+    const g=Math.min(e/Dpag,1);
+    pagFill.style.width=(g*100)+'%';
+    setStage(pagStage, g<SPLIT ? 'stage 1/2: CPU copies into a hidden pinned staging buffer…' : 'stage 2/2: DMA staging buffer → GPU',
+             g<SPLIT ? '#ffb350' : '#ffd9a0');
+    if(e<Dpin) setStage(pinStage,'DMA: pinned RAM → GPU (CPU free to overlap)','#9ccc65');
+    else setStage(pinStage,'done ✓','#9ccc65');
+    if(e<Dpag){ requestAnimationFrame(frame); }
+    else{
+      setStage(pagStage,'done — but the CPU did double duty','#ffd9a0');
+      pinVerdict.textContent='1 GB in ≈ 0.04 s  (~25 GB/s) — one direct DMA transfer';
+      pagVerdict.textContent='1 GB in ≈ 0.10 s  (~10 GB/s) — extra staging copy + sync ⇒ ~2.5× slower (illustrative)';
+      racing=false; raceBtn.disabled=false;
+    }
+  }
+  requestAnimationFrame(frame);
+});
+
+/* GPUDirect toggle */
+const gdBox=document.getElementById('gdBox');
+document.querySelectorAll('#segGd button').forEach(b=>{
+  b.addEventListener('click',()=>{
+    document.querySelectorAll('#segGd button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');
+    gdBox.classList.toggle('on', b.dataset.v==='on');
+  });
+});
+
+/* ============ section 5 : memlock lab ============ */
+let need=16, ulim=0.0625;
+function segVal(id,cb){ document.querySelectorAll('#'+id+' button').forEach(b=>{
+  b.addEventListener('click',()=>{ document.querySelectorAll('#'+id+' button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on'); cb(parseFloat(b.dataset.v)); }); }); }
+segVal('segNeed',v=>{need=v;memVerdict();});
+segVal('segUlimit',v=>{ulim=v;memVerdict();});
+function memVerdict(){
+  const el=document.getElementById('memVerdict');
+  if(ulim>=1e9 || ulim>=need){ el.className='ok';
+    el.innerHTML=`✓ pinned allocation succeeds — ${need} GB of page-locked buffers ${ulim>=1e9?'(memlock: unlimited)':'fits under ulimit -l = '+need+' GB'}. Set it once per host / container and forget about it.`; }
+  else { el.className='no';
+    el.innerHTML=`✗ <b>cudaHostAlloc fails</b> — you want ${need} GB pinned, but memlock caps you at ${ulim<1?Math.round(ulim*1024)+' MB':ulim+' GB'}. Raise the limit: <code>ulimit -l unlimited</code> (or <code>docker --ulimit memlock=-1</code>).`; }
+}
+memVerdict();
+</script>
+</body>
+</html>
